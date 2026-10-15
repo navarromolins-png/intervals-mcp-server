@@ -135,6 +135,43 @@ class SingleClientOAuthProvider(OAuthProvider):
     async def exchange_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: RefreshToken, scopes: list[str]
     ) -> OAuthToken:
+
+      
+# --- Accept client_secret_basic as well as client_secret_post ---------------
+# Claude.ai sends the client secret in an HTTP Basic Authorization header (and
+# may omit client_id from the form body). The SDK only reads the method the
+# client is registered with, so Basic requests were rejected with 401. Turn a
+# valid Basic header into the equivalent form fields before the SDK checks it.
+import base64 as _b64  # noqa: E402
+from urllib.parse import unquote as _unquote  # noqa: E402
+ 
+from mcp.server.auth.middleware.client_auth import (  # noqa: E402
+    AuthenticationError as _AuthErr,
+    ClientAuthenticator as _ClientAuthenticator,
+)
+from starlette.datastructures import FormData as _FormData  # noqa: E402
+ 
+_sdk_authenticate = _ClientAuthenticator.authenticate_request
+ 
+ 
+async def _authenticate_post_or_basic(self, request):  # type: ignore[no-untyped-def]
+    header = request.headers.get("Authorization", "")
+    if header.startswith("Basic "):
+        try:
+            cid, secret = _b64.b64decode(header[6:]).decode("utf-8").split(":", 1)
+        except (ValueError, UnicodeDecodeError):
+            raise _AuthErr("Invalid Basic authentication header")
+        cid, secret = _unquote(cid), _unquote(secret)
+        form = await request.form()
+        if form.get("client_id") not in (None, "", cid):
+            raise _AuthErr("Client ID mismatch in Basic auth")
+        items = [(k, v) for k, v in form.multi_items() if k not in ("client_id", "client_secret")]
+        request._form = _FormData(items + [("client_id", cid), ("client_secret", secret)])
+    return await _sdk_authenticate(self, request)
+ 
+ 
+_ClientAuthenticator.authenticate_request = _authenticate_post_or_basic  # type: ignore[method-assign]
+ 
         raise NotImplementedError("Refresh tokens are not supported")
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
