@@ -68,4 +68,47 @@ def start_server(mcp_instance: FastMCP, transport: TransportAliases) -> None:
             port,
             fastmcp.settings.streamable_http_path,
         )
-        mcp_instance.run(transport="streamable-http", host=host, port=port)
+        secret = os.getenv("MCP_CLIENT_SECRET", "")
+        if not secret:
+            mcp_instance.run(transport="streamable-http", host=host, port=port)
+            return
+        import uvicorn
+
+        app = _KeyAuthShim(mcp_instance.http_app(transport="streamable-http"), secret)
+        uvicorn.run(app, host=host, port=port, proxy_headers=True, forwarded_allow_ips="*")
+
+
+class _KeyAuthShim:
+    """Lets clients authenticate without OAuth.
+
+    Accepts the access token (MCP_CLIENT_SECRET) as a ``?key=`` query
+    parameter, and tidies the Authorization header (extra spaces, a doubled
+    "Bearer " prefix) before the regular bearer-token check runs.
+    """
+
+    def __init__(self, app, secret: str):  # type: ignore[no-untyped-def]
+        self.app = app
+        self.secret = secret
+
+    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        if scope["type"] == "http" and scope.get("path", "").startswith("/mcp"):
+            from urllib.parse import parse_qs
+
+            auth = dict(scope["headers"]).get(b"authorization", b"").decode("latin-1").strip()
+            token = None
+            if auth.lower().startswith("bearer "):
+                token = auth
+                while token.lower().startswith("bearer "):
+                    token = token[7:].strip()
+            key = parse_qs(scope.get("query_string", b"").decode()).get("key", [""])[0].strip()
+            if key:
+                token = key
+            if token is not None:
+                if token != self.secret:
+                    logger.info(
+                        "Bearer token mismatch (len=%d, expected len=%d)", len(token), len(self.secret)
+                    )
+                headers = [(k, v) for k, v in scope["headers"] if k != b"authorization"]
+                headers.append((b"authorization", f"Bearer {token}".encode("latin-1")))
+                scope = dict(scope, headers=headers)
+        await self.app(scope, receive, send)
