@@ -91,11 +91,18 @@ class _KeyAuthShim:
         self.secret = secret
 
     async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        path_key = None
+        if scope["type"] == "http" and scope.get("path", "").startswith("/k/"):
+            # URL form: /k/<secret>/mcp  -> served as /mcp with <secret> as the token
+            _, _, rest = scope["path"][3:].partition("/")
+            path_key = scope["path"][3:].split("/", 1)[0]
+            new_path = "/" + rest
+            scope = dict(scope, path=new_path, raw_path=new_path.encode())
         if scope["type"] == "http" and scope.get("path", "").startswith("/mcp"):
             from urllib.parse import parse_qs
 
             auth = dict(scope["headers"]).get(b"authorization", b"").decode("latin-1").strip()
-            token = None
+            token = path_key
             if auth.lower().startswith("bearer "):
                 token = auth
                 while token.lower().startswith("bearer "):
